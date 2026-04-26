@@ -16,10 +16,13 @@
 "   let g:llm_model = 'claude-sonnet-4-6'
 "   set ANTHROPIC_API_KEY in environment (or let g:llm_api_key = '...')
 
-let g:llm_url     = get(g:, 'llm_url',     'http://localhost:8080')
-let g:llm_model   = get(g:, 'llm_model',   'mlx-community/Qwen3.6-27B-4bit')
-let g:llm_sys     = get(g:, 'llm_sys',     'Concise coding assistant. No explanations unless asked.')
-let g:llm_api_key = get(g:, 'llm_api_key', '')
+let g:llm_url       = get(g:, 'llm_url',       'http://localhost:8080')
+let g:llm_model     = get(g:, 'llm_model',     'mlx-community/Qwen3.6-27B-4bit')
+let g:llm_sys       = get(g:, 'llm_sys',       'Concise coding assistant. No explanations unless asked.')
+let g:llm_api_key   = get(g:, 'llm_api_key',   '')
+let g:llm_ctx_files = get(g:, 'llm_ctx_files', ['CLAUDE.md', 'AGENTS.md', '.llm-context'])
+
+let s:ctx_loaded_dir = ''
 
 " --- context buffer ---
 
@@ -61,7 +64,21 @@ endfunction
 
 function! s:ClearCtx()
     call setbufline(s:CtxBuf(), 1, [''])
+    let s:ctx_loaded_dir = ''
     echo 'Context cleared'
+endfunction
+
+function! s:AutoLoadCtx()
+    let dir = getcwd()
+    if s:ctx_loaded_dir ==# dir | return | endif
+    let s:ctx_loaded_dir = dir
+    for name in g:llm_ctx_files
+        let path = dir . '/' . name
+        if filereadable(path)
+            call s:CtxAdd(['### ' . name, ''] + readfile(path) + [''])
+            echo 'llm: loaded ' . name
+        endif
+    endfor
 endfunction
 
 " --- response buffer ---
@@ -175,6 +192,7 @@ PYEOF
 " --- commands ---
 
 function! s:Ask(context)
+    call s:AutoLoadCtx()
     let q = input('Ask: ')
     if empty(q) | return | endif
     let prev = winnr()
