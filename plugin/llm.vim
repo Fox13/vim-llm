@@ -16,13 +16,101 @@
 "   let g:llm_model = 'claude-sonnet-4-6'
 "   set ANTHROPIC_API_KEY in environment (or let g:llm_api_key = '...')
 
+if !has('python3')
+    finish
+endif
+if !has('job')
+    finish
+endif
+
 let g:llm_url       = get(g:, 'llm_url',       'http://localhost:8080')
-let g:llm_model     = get(g:, 'llm_model',     'mlx-community/Qwen3.6-27B-4bit')
+let g:llm_model     = get(g:, 'llm_model',     'mlx-community/gemma-4-e4b-it-4bit')
 let g:llm_sys       = get(g:, 'llm_sys',       'Concise coding assistant. No explanations unless asked.')
 let g:llm_api_key   = get(g:, 'llm_api_key',   '')
 let g:llm_ctx_files = get(g:, 'llm_ctx_files', ['CLAUDE.md', 'AGENTS.md', '.llm-context'])
 
 let s:ctx_loaded_dir = ''
+let s:llm_buf        = -1
+let s:llm_mode       = 'ask'
+let s:llm_replace    = {}
+
+" --- write Python helper to a temp file at load time ---
+
+python3 << PYEOF
+import tempfile, vim
+
+_src = r"""
+import json, os, sys, urllib.request
+
+args      = json.loads(sys.argv[1])
+url       = args['url']
+model     = args['model']
+sys_msg   = args['sys']
+key       = args['key'] or os.environ.get('ANTHROPIC_API_KEY', '')
+context   = args['context']
+question  = args['question']
+anthropic = 'anthropic.com' in url
+
+content = '\n\n'.join(filter(None, [context, question]))
+
+if anthropic:
+    endpoint = url + '/v1/messages'
+    body = json.dumps({
+        'model': model, 'max_tokens': 4096, 'stream': True,
+        'system': sys_msg,
+        'messages': [{'role': 'user', 'content': content}],
+    }).encode()
+    headers = {
+        'Content-Type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+    }
+else:
+    endpoint = url + '/v1/chat/completions'
+    body = json.dumps({
+        'model': model, 'max_tokens': 4096, 'stream': True,
+        'messages': [
+            {'role': 'system', 'content': sys_msg},
+            {'role': 'user', 'content': content + ' /no_think'},
+        ],
+    }).encode()
+    headers = {'Content-Type': 'application/json'}
+    if key:
+        headers['Authorization'] = 'Bearer ' + key
+
+try:
+    req = urllib.request.Request(endpoint, data=body, headers=headers)
+    with urllib.request.urlopen(req, timeout=120) as r:
+        for raw in r:
+            line = raw.decode().strip()
+            if not line.startswith('data: '):
+                continue
+            d = line[6:]
+            if d == '[DONE]':
+                break
+            if anthropic:
+                ev = json.loads(d)
+                if ev.get('type') != 'content_block_delta':
+                    continue
+                text = ev['delta'].get('text', '')
+            else:
+                text = json.loads(d)['choices'][0]['delta'].get('content', '')
+            if text:
+                sys.stdout.write(text)
+                sys.stdout.flush()
+except Exception as e:
+    sys.stdout.write('\n[error: {}]'.format(e))
+    sys.stdout.flush()
+"""
+
+_path = tempfile.mktemp(suffix='.py')
+with open(_path, 'w') as f:
+    f.write(_src.lstrip())
+vim.vars['_llm_helper_py'] = _path
+PYEOF
+
+let s:helper_py = g:_llm_helper_py
+unlet g:_llm_helper_py
 
 " --- context buffer ---
 
@@ -101,93 +189,71 @@ function! s:ResponseBuf()
     silent %delete _
 endfunction
 
-" --- HTTP call via Python ---
+" --- job callbacks ---
 
-python3 << PYEOF
-import json, os, urllib.request, vim
+function! s:JobOut(ch, data)
+    let bnr = s:llm_buf
+    if bnr == -1 | return | endif
+    let lines = getbufline(bnr, 1, '$')
+    if lines == [''] | let lines = [''] | endif
+    let parts = split(a:data, "\n", 1)
+    let lines[-1] .= parts[0]
+    for part in parts[1:]
+        call add(lines, part)
+    endfor
+    call setbufline(bnr, 1, lines)
+    redraw
+endfunction
 
-def _is_anthropic(url):
-    return 'anthropic.com' in url
+function! s:JobErr(ch, data)
+    let bnr = s:llm_buf
+    if bnr != -1
+        let lines = getbufline(bnr, 1, '$')
+        let lines[-1] .= '[err: ' . a:data . ']'
+        call setbufline(bnr, 1, lines)
+        redraw
+    endif
+endfunction
 
-def _stream_openai(resp, buf):
-    for raw in resp:
-        line = raw.decode().strip()
-        if not line.startswith('data: '):
-            continue
-        data = line[6:]
-        if data == '[DONE]':
-            break
-        delta = json.loads(data)['choices'][0]['delta'].get('content', '')
-        _append(buf, delta)
-
-def _stream_anthropic(resp, buf):
-    for raw in resp:
-        line = raw.decode().strip()
-        if not line.startswith('data: '):
-            continue
-        ev = json.loads(line[6:])
-        if ev.get('type') == 'content_block_delta':
-            _append(buf, ev['delta'].get('text', ''))
-
-def _append(buf, text):
-    if not text:
+function! s:JobClose(ch)
+    if s:llm_mode !=# 'replace' || empty(s:llm_replace)
         return
-    lines = buf[:]
-    for ch in text:
-        if ch == '\n':
-            lines.append('')
-        else:
-            lines[-1] += ch
-    buf[:] = lines
-    vim.command('redraw')
+    endif
+    let r = s:llm_replace
+    let result = getbufline(s:llm_buf, 1, '$')
+    while len(result) > 1 && result[-1] ==# ''
+        call remove(result, -1)
+    endwhile
+    let wnr = bufwinnr(r.buf)
+    if wnr != -1
+        execute wnr . 'wincmd w'
+        execute r.first . ',' . r.last . 'delete _'
+        call append(r.first - 1, result)
+    endif
+    let s:llm_replace = {}
+    let s:llm_mode = 'ask'
+endfunction
 
-def llm_call(context, question):
-    url     = vim.eval('g:llm_url')
-    model   = vim.eval('g:llm_model')
-    sys_msg = vim.eval('g:llm_sys')
-    api_key = vim.eval('g:llm_api_key') or os.environ.get('ANTHROPIC_API_KEY', '')
-    anthropic = _is_anthropic(url)
+" --- start a request ---
 
-    ctx_buf = vim.eval('s:CtxGet()')
-    full_context = '\n\n'.join(filter(None, [ctx_buf, context]))
-
-    if anthropic:
-        endpoint = url + '/v1/messages'
-        body = json.dumps({
-            'model': model, 'max_tokens': 4096, 'stream': True,
-            'system': sys_msg,
-            'messages': [{'role': 'user', 'content': f"{full_context}\n\n{question}"}],
-        }).encode()
-        headers = {
-            'Content-Type': 'application/json',
-            'x-api-key': api_key,
-            'anthropic-version': '2023-06-01',
-        }
-    else:
-        endpoint = url + '/v1/chat/completions'
-        body = json.dumps({
-            'model': model, 'max_tokens': 4096, 'stream': True,
-            'messages': [
-                {'role': 'system', 'content': sys_msg},
-                {'role': 'user',   'content': f"{full_context}\n\n{question} /no_think"},
-            ],
-        }).encode()
-        headers = {'Content-Type': 'application/json'}
-        if api_key:
-            headers['Authorization'] = f'Bearer {api_key}'
-
-    buf = vim.current.buffer
-    buf[:] = ['']
-    try:
-        req = urllib.request.Request(endpoint, data=body, headers=headers)
-        with urllib.request.urlopen(req, timeout=120) as r:
-            if anthropic:
-                _stream_anthropic(r, buf)
-            else:
-                _stream_openai(r, buf)
-    except Exception as e:
-        buf[:] = [f'[error: {e}]']
-PYEOF
+function! s:StartJob(context, question)
+    let ctx = join(filter([s:CtxGet(), a:context], 'v:val !=# ""'), "\n\n")
+    let args = json_encode({
+        \ 'url':      g:llm_url,
+        \ 'model':    g:llm_model,
+        \ 'sys':      g:llm_sys,
+        \ 'key':      empty(g:llm_api_key) ? '' : g:llm_api_key,
+        \ 'context':  ctx,
+        \ 'question': a:question,
+    \})
+    call job_start(['python3', s:helper_py, args], {
+        \ 'out_cb':   function('s:JobOut'),
+        \ 'err_cb':   function('s:JobErr'),
+        \ 'close_cb': function('s:JobClose'),
+        \ 'out_mode': 'raw',
+        \ 'err_mode': 'raw',
+    \})
+endfunction
 
 " --- commands ---
 
@@ -195,10 +261,12 @@ function! s:Ask(context)
     call s:AutoLoadCtx()
     let q = input('Ask: ')
     if empty(q) | return | endif
-    let prev = winnr()
+    let prev_win = winnr()
+    let s:llm_mode = 'ask'
     call s:ResponseBuf()
-    call py3eval('llm_call(vim.eval("a:context"), vim.eval("a:q"))')
-    execute prev . 'wincmd w'
+    let s:llm_buf = bufnr('%')
+    call s:StartJob(a:context, q)
+    execute prev_win . 'wincmd w'
 endfunction
 
 function! s:AskFile()
@@ -215,15 +283,13 @@ function! s:ReplaceSel() range
     let ctx = join(getline(a:firstline, a:lastline), "\n")
     let q = input('Replace with: ')
     if empty(q) | return | endif
-    let prev_buf = bufnr('%')
-    let prev_first = a:firstline
-    let prev_last = a:lastline
+    let s:llm_mode = 'replace'
+    let s:llm_replace = {'buf': bufnr('%'), 'first': a:firstline, 'last': a:lastline}
+    let prev_win = winnr()
     call s:ResponseBuf()
-    call py3eval('llm_call(vim.eval("ctx"), vim.eval("q"))')
-    let result = getline(1, '$')
-    execute bufwinnr(prev_buf) . 'wincmd w'
-    execute prev_first . ',' . prev_last . 'delete _'
-    call append(prev_first - 1, result)
+    let s:llm_buf = bufnr('%')
+    call s:StartJob(ctx, q)
+    execute prev_win . 'wincmd w'
 endfunction
 
 nnoremap <leader>a  :call <SID>AskFile()<CR>
