@@ -5,6 +5,8 @@
 " \ac  add current file to context
 " \sc  add visual selection to context  (visual mode)
 " \cc  clear context
+" \ht  toggle conversation history on/off
+" \hc  clear conversation history
 "
 " OpenAI-compatible (local or remote):
 "   let g:llm_url     = 'http://localhost:8080'   (default)
@@ -28,11 +30,15 @@ let g:llm_model     = get(g:, 'llm_model',     'mlx-community/gemma-4-e4b-it-4bi
 let g:llm_sys       = get(g:, 'llm_sys',       'Concise coding assistant. No explanations unless asked.')
 let g:llm_api_key   = get(g:, 'llm_api_key',   '')
 let g:llm_ctx_files = get(g:, 'llm_ctx_files', ['CLAUDE.md', 'AGENTS.md', '.llm-context'])
+let g:llm_history   = get(g:, 'llm_history',   1)
 
-let s:ctx_loaded_dir = ''
-let s:llm_buf        = -1
-let s:llm_mode       = 'ask'
-let s:llm_replace    = {}
+let s:ctx_loaded_dir      = ''
+let s:llm_buf             = -1
+let s:llm_mode            = 'ask'
+let s:llm_replace         = {}
+let s:history             = []
+let s:pending_user_msg    = ''
+let s:response_start_line = 1
 
 " --- write Python helper to a temp file at load time ---
 
@@ -49,6 +55,7 @@ sys_msg   = args['sys']
 key       = args['key'] or os.environ.get('ANTHROPIC_API_KEY', '')
 context   = args['context']
 question  = args['question']
+history   = args['history']
 anthropic = 'anthropic.com' in url
 
 content = '\n\n'.join(filter(None, [context, question]))
@@ -58,7 +65,7 @@ if anthropic:
     body = json.dumps({
         'model': model, 'max_tokens': 4096, 'stream': True,
         'system': sys_msg,
-        'messages': [{'role': 'user', 'content': content}],
+        'messages': history + [{'role': 'user', 'content': content}],
     }).encode()
     headers = {
         'Content-Type': 'application/json',
@@ -69,10 +76,7 @@ else:
     endpoint = url + '/v1/chat/completions'
     body = json.dumps({
         'model': model, 'max_tokens': 4096, 'stream': True,
-        'messages': [
-            {'role': 'system', 'content': sys_msg},
-            {'role': 'user', 'content': content + ' /no_think'},
-        ],
+        'messages': [{'role': 'system', 'content': sys_msg}] + history + [{'role': 'user', 'content': content + ' /no_think'}],
     }).encode()
     headers = {'Content-Type': 'application/json'}
     if key:
@@ -186,7 +190,9 @@ function! s:ResponseBuf()
         endif
     endif
     setlocal buftype=nofile bufhidden=hide noswapfile filetype=markdown
-    silent %delete _
+    if !(getline(1) ==# '' && line('$') == 1)
+        call append('$', ['', '---', ''])
+    endif
 endfunction
 
 " --- job callbacks ---
@@ -216,28 +222,36 @@ function! s:JobErr(ch, data)
 endfunction
 
 function! s:JobClose(ch)
-    if s:llm_mode !=# 'replace' || empty(s:llm_replace)
+    if s:llm_mode ==# 'replace' && !empty(s:llm_replace)
+        let r = s:llm_replace
+        let result = getbufline(s:llm_buf, s:response_start_line, '$')
+        while len(result) > 1 && result[-1] ==# ''
+            call remove(result, -1)
+        endwhile
+        let wnr = bufwinnr(r.buf)
+        if wnr != -1
+            execute wnr . 'wincmd w'
+            execute r.first . ',' . r.last . 'delete _'
+            call append(r.first - 1, result)
+        endif
+        let s:llm_replace = {}
+        let s:llm_mode = 'ask'
+        let s:pending_user_msg = ''
         return
     endif
-    let r = s:llm_replace
-    let result = getbufline(s:llm_buf, 1, '$')
-    while len(result) > 1 && result[-1] ==# ''
-        call remove(result, -1)
-    endwhile
-    let wnr = bufwinnr(r.buf)
-    if wnr != -1
-        execute wnr . 'wincmd w'
-        execute r.first . ',' . r.last . 'delete _'
-        call append(r.first - 1, result)
+    if g:llm_history && !empty(s:pending_user_msg) && s:llm_buf != -1
+        let resp = join(getbufline(s:llm_buf, s:response_start_line, '$'), "\n")
+        call add(s:history, {'role': 'user',      'content': s:pending_user_msg})
+        call add(s:history, {'role': 'assistant', 'content': resp})
     endif
-    let s:llm_replace = {}
-    let s:llm_mode = 'ask'
+    let s:pending_user_msg = ''
 endfunction
 
 " --- start a request ---
 
 function! s:StartJob(context, question)
     let ctx = join(filter([s:CtxGet(), a:context], 'v:val !=# ""'), "\n\n")
+    let s:pending_user_msg = join(filter([ctx, a:question], 'v:val !=# ""'), "\n\n")
     let args = json_encode({
         \ 'url':      g:llm_url,
         \ 'model':    g:llm_model,
@@ -245,6 +259,7 @@ function! s:StartJob(context, question)
         \ 'key':      empty(g:llm_api_key) ? '' : g:llm_api_key,
         \ 'context':  ctx,
         \ 'question': a:question,
+        \ 'history':  g:llm_history ? s:history : [],
     \})
     call job_start(['python3', s:helper_py, args], {
         \ 'out_cb':   function('s:JobOut'),
@@ -265,6 +280,13 @@ function! s:Ask(context)
     let s:llm_mode = 'ask'
     call s:ResponseBuf()
     let s:llm_buf = bufnr('%')
+    if getline(1) ==# '' && line('$') == 1
+        call setline(1, '**' . q . '**')
+        call append(1, '')
+    else
+        call append('$', ['**' . q . '**', ''])
+    endif
+    let s:response_start_line = line('$')
     call s:StartJob(a:context, q)
     execute prev_win . 'wincmd w'
 endfunction
@@ -288,8 +310,25 @@ function! s:ReplaceSel() range
     let prev_win = winnr()
     call s:ResponseBuf()
     let s:llm_buf = bufnr('%')
+    let s:response_start_line = line('$')
     call s:StartJob(ctx, q)
     execute prev_win . 'wincmd w'
+endfunction
+
+function! s:ClearHistory()
+    let s:history = []
+    let s:pending_user_msg = ''
+    let bnr = bufnr('__llm__')
+    if bnr != -1
+        call deletebufline(bnr, 2, '$')
+        call setbufline(bnr, 1, '')
+    endif
+    echo 'History cleared'
+endfunction
+
+function! s:ToggleHistory()
+    let g:llm_history = !g:llm_history
+    echo 'History ' . (g:llm_history ? 'on' : 'off')
 endfunction
 
 nnoremap <leader>a  :call <SID>AskFile()<CR>
@@ -298,3 +337,5 @@ vnoremap <leader>r  :call <SID>ReplaceSel()<CR>
 nnoremap <leader>ac :call <SID>AddFileToCTX()<CR>
 vnoremap <leader>sc :call <SID>AddSelToCtx()<CR>
 nnoremap <leader>cc :call <SID>ClearCtx()<CR>
+nnoremap <leader>ht :call <SID>ToggleHistory()<CR>
+nnoremap <leader>hc :call <SID>ClearHistory()<CR>
