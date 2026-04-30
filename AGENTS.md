@@ -7,7 +7,6 @@ A minimal vim plugin for LLM-assisted editing. Single file, no dependencies beyo
 - **Hand-editable**: the whole plugin fits in one screen. If you can't read it end-to-end in 2 minutes, it's too complex.
 - **No hidden state**: context is a visible vim buffer you can inspect and edit directly.
 - **No dependencies**: pure Python stdlib + vim. No pip installs, no external tools.
-- **Stateless requests**: each call is independent. No conversation history accumulation means no context window creep.
 - **Two backends only**: OpenAI-compatible endpoints (local or remote) and Anthropic's API. Detection is automatic via URL.
 
 ## Current keybindings
@@ -20,6 +19,8 @@ A minimal vim plugin for LLM-assisted editing. Single file, no dependencies beyo
 | `\ac` | normal | Add current file to context buffer |
 | `\sc` | visual | Add selection to context buffer |
 | `\cc` | normal | Clear context buffer |
+| `\ht` | normal | Toggle conversation history on/off |
+| `\hc` | normal | Clear conversation history (and response buffer) |
 
 ## Buffers
 
@@ -29,13 +30,17 @@ A minimal vim plugin for LLM-assisted editing. Single file, no dependencies beyo
 ## Configuration
 
 ```vim
-let g:llm_url     = 'http://localhost:8080'          " any OpenAI-compatible endpoint
-let g:llm_model   = 'mlx-community/Qwen3.6-27B-4bit'
-let g:llm_sys     = 'Concise coding assistant. No explanations unless asked.'
-let g:llm_api_key = ''                               " or set ANTHROPIC_API_KEY in env
+let g:llm_url       = 'http://localhost:8080'          " any OpenAI-compatible endpoint
+let g:llm_model     = 'mlx-community/gemma-4-e4b-it-4bit'
+let g:llm_sys       = 'Concise coding assistant. No explanations unless asked.'
+let g:llm_api_key   = ''                               " or set ANTHROPIC_API_KEY in env
+let g:llm_history   = 1                                " 1 = on, 0 = off; toggle with \ht
+let g:llm_ctx_files = ['CLAUDE.md', 'AGENTS.md', '.llm-context']
 ```
 
 For Claude, set `g:llm_url = 'https://api.anthropic.com'` and `g:llm_model = 'claude-sonnet-4-6'`.
+
+`g:llm_ctx_files` lists filenames auto-loaded from the current directory into the context buffer on first use per session.
 
 ## Local setup
 
