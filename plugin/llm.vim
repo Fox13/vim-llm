@@ -28,10 +28,10 @@ if !has('job')
 endif
 
 let g:llm_url       = get(g:, 'llm_url',       'http://localhost:8080')
-let g:llm_model     = get(g:, 'llm_model',     'mlx-community/Qwen3.6-27B-4bit')
+let g:llm_model     = get(g:, 'llm_model',     'mlx-community/Qwen3.8-27B-4bit')
 
 let s:models = {
-    \ 'qwen':    {'url': 'http://localhost:8080', 'model': 'mlx-community/Qwen3.6-27B-4bit'},
+    \ 'qwen':    {'url': 'http://localhost:8080', 'model': 'mlx-community/Qwen3.8-27B-4bit'},
     \ 'glimmer': {'url': 'http://localhost:8081', 'model': 'mlx-community/Muse-Glimmer-30B-4bit'},
 \ }
 let g:llm_sys       = get(g:, 'llm_sys',       'Concise coding assistant. No explanations unless asked.')
