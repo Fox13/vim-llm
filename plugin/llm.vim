@@ -7,6 +7,8 @@
 " \cc  clear context
 " \ht  toggle conversation history on/off
 " \hc  clear conversation history
+" \mq  switch to Qwen 3.6 27B  (localhost:8080)
+" \mg  switch to Muse Glimmer  (localhost:8081)
 "
 " OpenAI-compatible (local or remote):
 "   let g:llm_url     = 'http://localhost:8080'   (default)
@@ -26,7 +28,12 @@ if !has('job')
 endif
 
 let g:llm_url       = get(g:, 'llm_url',       'http://localhost:8080')
-let g:llm_model     = get(g:, 'llm_model',     'mlx-community/gemma-4-e4b-it-4bit')
+let g:llm_model     = get(g:, 'llm_model',     'mlx-community/Qwen3.6-27B-4bit')
+
+let s:models = {
+    \ 'qwen':    {'url': 'http://localhost:8080', 'model': 'mlx-community/Qwen3.6-27B-4bit'},
+    \ 'glimmer': {'url': 'http://localhost:8081', 'model': 'mlx-community/Muse-Glimmer-30B-4bit'},
+\ }
 let g:llm_sys       = get(g:, 'llm_sys',       'Concise coding assistant. No explanations unless asked.')
 let g:llm_api_key   = get(g:, 'llm_api_key',   '')
 let g:llm_ctx_files = get(g:, 'llm_ctx_files', ['CLAUDE.md', 'AGENTS.md', '.llm-context'])
@@ -331,6 +338,16 @@ function! s:ToggleHistory()
     echo 'History ' . (g:llm_history ? 'on' : 'off')
 endfunction
 
+function! s:SwitchModel(name)
+    if !has_key(s:models, a:name)
+        echo 'Unknown model: ' . a:name . ' (available: ' . join(keys(s:models), ', ') . ')'
+        return
+    endif
+    let g:llm_url   = s:models[a:name]['url']
+    let g:llm_model = s:models[a:name]['model']
+    echo 'LLM: ' . a:name . ' (' . g:llm_url . ')'
+endfunction
+
 nnoremap <leader>a  :call <SID>AskFile()<CR>
 vnoremap <leader>s  :call <SID>AskSel()<CR>
 vnoremap <leader>r  :call <SID>ReplaceSel()<CR>
@@ -339,3 +356,5 @@ vnoremap <leader>sc :call <SID>AddSelToCtx()<CR>
 nnoremap <leader>cc :call <SID>ClearCtx()<CR>
 nnoremap <leader>ht :call <SID>ToggleHistory()<CR>
 nnoremap <leader>hc :call <SID>ClearHistory()<CR>
+nnoremap <leader>mq :call <SID>SwitchModel('qwen')<CR>
+nnoremap <leader>mg :call <SID>SwitchModel('glimmer')<CR>
